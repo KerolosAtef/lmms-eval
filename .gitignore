@@ -50,3 +50,6 @@ span.log
 uv.lock
 workspace/*
 .claude/*
+infinibench_cache/
+infinibench_results
+*.out
