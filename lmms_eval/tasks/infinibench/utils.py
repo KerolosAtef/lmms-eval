@@ -238,7 +238,9 @@ def infinibench_doc_to_text(doc, lmms_eval_specific_kwargs=None):
     if skill_name in MCQ_SKILLS:
         answer_idx = int(doc['answer_idx'])
         question = doc['question'] + "\nOptions are:\n"
-        for idx, option in enumerate(doc['options']):
+        options = doc.get('options', [])
+        options = ast.literal_eval(options) if isinstance(options, str) else options
+        for idx, option in enumerate(options):
             option_letter = chr(65 + idx)  # Convert index to letter (0 -> A, 1 -> B, etc.)
             question += f"({option_letter}) {option}\n"
     if skill_name in MCQ_SKILLS:
