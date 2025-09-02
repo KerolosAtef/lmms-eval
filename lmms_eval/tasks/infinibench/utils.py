@@ -39,6 +39,11 @@ from openai import OpenAI
 OPEN_ENDED_SKILLS = ['summarization', 'spoiler_questions', 'deep_context_understanding', 'linking_multiple_events']
 MCQ_SKILLS = ['character_actions', 'scene_transitions', 'choronological_understanding', 'global_appearance']
 ALL_SKILLS = OPEN_ENDED_SKILLS + MCQ_SKILLS
+n_qa_per_skill = {}
+for split in ['train', 'validation', 'test']:
+    n_qa_per_skill[split] = {}
+    for skill in ALL_SKILLS:
+        n_qa_per_skill[split][skill] = 0
 
 # OpenAI API configuration for GPT evaluation
 GPT_EVAL_MODEL_NAME = os.getenv("MODEL_VERSION", "gpt-4o-mini")
@@ -71,8 +76,8 @@ def download_and_extract_infinibench_videos(config_file , split: str = "validati
     eval_logger.info(f"Downloading InfiniBench {split} videos...")
     
     # Get list of video part files for this split
-    # repo_files = list_repo_files(config_file['dataset_path'], repo_type="dataset")
-    repo_files = list_repo_files("Vision-CAIR/InfiniBench", repo_type="dataset")
+    repo_files = list_repo_files(config_file['dataset_path'], repo_type="dataset")
+    # repo_files = list_repo_files("Vision-CAIR/InfiniBench", repo_type="dataset")
     # Find video parts for the specified split
     video_parts = [f for f in repo_files if f.startswith(f"{split}/{split}_videos.tar.gz.part_")]
     video_parts.sort()  # Ensure correct order
@@ -88,7 +93,8 @@ def download_and_extract_infinibench_videos(config_file , split: str = "validati
     for part_file in video_parts:
         eval_logger.info(f"Downloading {part_file}...")
         local_path = hf_hub_download(
-            repo_id="Vision-CAIR/InfiniBench",
+            # repo_id="Vision-CAIR/InfiniBench",
+            repo_id=config_file['dataset_path'],
             repo_type="dataset", 
             filename=part_file,
             cache_dir=cache_dir,
@@ -137,6 +143,22 @@ config_file_test = load_config_file("infinibench_test.yaml")
 config_file_train = load_config_file("infinibench_train.yaml")
 
 Download_Videos=False
+used_split=""
+for split in ['train', 'validation', 'test']:
+    data_obj=datasets.load_dataset(config_file_val.get("dataset_path"), split=split, cache_dir=config_file_val.get("dataset_kwargs", {}).get("cache_dir", "./infinibench_cache"))
+    # print(f"{split} split has {len(data_obj)} samples")
+    for item in data_obj:
+        skill_name = item.get("skill_name", "unknown_skill")
+        if skill_name in ALL_SKILLS:
+            n_qa_per_skill[split][skill_name] += 1
+    
+    # map the split name to be consistent
+    if split == 'validation':
+        split='dev'
+        n_qa_per_skill['dev'] = n_qa_per_skill['validation']
+        n_qa_per_skill.pop('validation')
+    # print(f"{split} split QA counts for summarization : {n_qa_per_skill[split]['summarization']}")
+
 
 def round_by_factor(number: int, factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
@@ -204,6 +226,7 @@ def prepare_prompt(question, video_path,subtitle_path,skill_name,n_frames=128):
 
 def infinibench_doc_to_visual(doc):
     global Download_Videos
+    global used_split
     if not Download_Videos:
         if 'split' in doc and doc['split'] == 'train':
             download_and_extract_infinibench_videos(config_file_train, split="train")
@@ -218,12 +241,15 @@ def infinibench_doc_to_visual(doc):
     if 'split' in doc and doc['split'] == 'train':
         cache_dir_train = config_file_train.get("dataset_kwargs", {}).get("cache_dir", "./infinibench_cache")
         video_path = os.path.join(cache_dir_train,"train", doc["video_path_mp4"])
+        used_split='train'
     elif 'split' in doc and doc['split'] == 'dev':
         cache_dir_val = config_file_val.get("dataset_kwargs", {}).get("cache_dir", "./infinibench_cache")
         video_path = os.path.join(cache_dir_val, "validation",doc["video_path_mp4"])
+        used_split='dev'
     else:
         cache_dir_test = config_file_test.get("dataset_kwargs", {}).get("cache_dir", "./infinibench_cache")
         video_path = os.path.join(cache_dir_test,"test", doc["video_path_mp4"])
+        used_split='test'
     if os.path.exists(video_path):
         video_path = video_path
     else:
@@ -311,6 +337,7 @@ def infinibench_process_results(doc, results):
     """
     pred = results[0]
     skill_name = doc.get("skill_name", "unknown_skill")
+    split= doc.get("split")
     
     if skill_name in MCQ_SKILLS:
         answer = chr(65 + int(doc['answer_idx']))
@@ -337,7 +364,8 @@ def infinibench_process_results(doc, results):
         "pred": pred_ans, 
         "answer": answer, 
         "question": input_prompt,
-        "raw_model_output": pred
+        "raw_model_output": pred,
+        "split": split
     }
 
     # Return data structure that the aggregation function expects
@@ -482,13 +510,18 @@ def gpt_score_wrapper(qa: Dict[str, Any], max_retries: int = 3, retry_delay: flo
                 break
     return qa
 def mcq_accuracy(res):
+    global n_qa_per_skill
+    if len(res) == 0:
+        return 0
     total_correct = 0
-    total_answered = 0
+    skill_name=res[0].get("task_type", "unknown_skill")
+    split=res[0].get("split", "unknown_split")
+    total_qa = n_qa_per_skill.get(split, {}).get(skill_name, 0)
     for r in res:
-        total_answered += 1
+        # total_answered += 1
         # For MCQ, compare the predicted letter with the ground truth letter
         total_correct += str(r["pred"]) == str(r["answer"])
-    accuracy = 100 * total_correct / total_answered if total_answered > 0 else 0
+    accuracy = 100 * (total_correct / total_qa) if total_qa > 0 else 0
     return accuracy
 
 def infinibench_aggregate_results(results):
@@ -498,6 +531,11 @@ def infinibench_aggregate_results(results):
     Returns:
         A score
     """
+    if len(results) > 0:
+        split = results[0].get("split", "unknown_split")
+    else:
+        split = "unknown_split"
+    global n_qa_per_skill
     tasks = {}
     for skill in ALL_SKILLS:
         tasks[skill] = []
@@ -526,29 +564,67 @@ def infinibench_aggregate_results(results):
     total_mcq_accuracy = 0
     
     for task_cate, res in tasks.items():
-        if len(res) == 0:
-            eval_logger.warning(f"No results found for task category: {task_cate}")
-            continue
+        # if len(res) == 0:
+        #     eval_logger.warning(f"No results found for task category: {task_cate}")
+        #     continue
             
         if task_cate in MCQ_SKILLS:
             accuracy = mcq_accuracy(res)
             task_category_scores[task_cate] = accuracy
             total_mcq_accuracy += accuracy
-            eval_logger.info(f"Evaluation on Task Categories: {task_cate}: {accuracy:.1f}%")
         else:
             # For open-ended questions
             total_score = sum(r["gpt_score"] for r in res if r["gpt_score"] is not None)
-            total_answered = sum(1 for r in res if r["gpt_score"] is not None)
-            category_score = total_score / total_answered if total_answered > 0 else 0
+            # total_answered = sum(1 for r in res if r["gpt_score"] is not None)
+            # category_score = total_score / total_answered if total_answered > 0 else 0
+            # split=res.get("split", "unknown_split")
+            total_qa= n_qa_per_skill.get(split, {}).get(task_cate, 0)
+            category_score = total_score / total_qa if total_qa > 0 else 0
             task_category_scores[task_cate] = category_score
             total_open_ended_score += category_score
-            eval_logger.info(f"Evaluation on Task Categories: {task_cate}: {category_score:.1f}/10")
     
     average_open_ended_score = total_open_ended_score / len(OPEN_ENDED_SKILLS) if OPEN_ENDED_SKILLS else 0
     average_mcq_accuracy = total_mcq_accuracy / len(MCQ_SKILLS) if MCQ_SKILLS else 0
     
-    eval_logger.info(f"Average Performance Across Open Ended Task Categories: {average_open_ended_score:.1f}/10")
-    eval_logger.info(f"Average Performance Across MCQ Task Categories: {average_mcq_accuracy:.1f}%")    
+    # Print professional results table
+    print("\n" + "="*95)
+    print("                            INFINIBENCH EVALUATION RESULTS")
+    print("="*95)
     
-    overall_score = 0.5 * (average_open_ended_score / 10) + 0.5 * (average_mcq_accuracy / 100)
+    # Header
+    print(f"{'Skill Category':<35} {'Type':<15} {'Total QA':<12} {'Score':<15}")
+    print("-" * 95)
+    
+    # MCQ Skills
+    for skill in MCQ_SKILLS:
+        if skill in task_category_scores:
+            total_qa = n_qa_per_skill.get(split, {}).get(skill, 0)
+            score_str = f"{task_category_scores[skill]:.2f}%"
+            print(f"{skill.replace('_', ' ').title():<35} {'MCQ':<15} {total_qa:<12} {score_str:<15}")
+    
+    # Open-ended Skills  
+    for skill in OPEN_ENDED_SKILLS:
+        if skill in task_category_scores:
+            total_qa = n_qa_per_skill.get(split, {}).get(skill, 0)
+            score_str = f"{task_category_scores[skill]:.2f}/10"
+            print(f"{skill.replace('_', ' ').title():<35} {'Open-ended':<15} {total_qa:<12} {score_str:<15}")
+    
+    print("-" * 95)
+    
+    # Calculate totals
+    total_mcq_qa = sum(n_qa_per_skill.get(split, {}).get(skill, 0) for skill in MCQ_SKILLS)
+    total_open_ended_qa = sum(n_qa_per_skill.get(split, {}).get(skill, 0) for skill in OPEN_ENDED_SKILLS)
+    total_all_qa = total_mcq_qa + total_open_ended_qa
+    
+    # Summary statistics
+    print(f"{'Average MCQ Accuracy':<35} {'Summary':<15} {total_mcq_qa:<12} {average_mcq_accuracy:.1f}%")
+    print(f"{'Average Open-ended Score':<35} {'Summary':<15} {total_open_ended_qa:<12} {average_open_ended_score:.1f}/10")
+    
+    print("=" * 95)
+    overall_score_val = 0.5 * (average_open_ended_score / 10) + 0.5 * (average_mcq_accuracy / 100)
+    print(f"{'OVERALL SCORE':<35} {'Final':<15} {total_all_qa:<12} {overall_score_val * 100:.2f}/100")
+    print("=" * 95)
+    print()
+    
+    overall_score = overall_score_val
     return overall_score * 100  # Scale to 0-100

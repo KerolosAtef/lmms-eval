@@ -2,8 +2,8 @@ dataset_path: Vision-CAIR/InfiniBench
 dataset_kwargs:
   token: True
   cache_dir: ./infinibench_cache
-task: infinibench_val
-test_split: validation
+task: infinibench_test
+test_split: test
 output_type: generate_until
 doc_to_visual: !function utils.infinibench_doc_to_visual
 doc_to_text: !function utils.infinibench_doc_to_text
