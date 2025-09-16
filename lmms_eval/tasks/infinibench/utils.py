@@ -302,11 +302,7 @@ def infinibench_doc_to_target(doc):
         
     Returns:
         str or int: Target answer (string for open-ended, int for MCQ)
-                   Returns empty string if no answer available (test split)
     """
-    # Check if this is test split (no ground truth available)
-    if doc.get('split') == 'test' or 'answer' not in doc:
-        return ""  # No ground truth available for test split
     
     # For MCQ questions
     if "answer_idx" in doc:
