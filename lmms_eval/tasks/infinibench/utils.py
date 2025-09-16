@@ -262,7 +262,7 @@ def infinibench_doc_to_text(doc, lmms_eval_specific_kwargs=None):
     question = doc["question"]
     skill_name = doc.get("skill_name", "unknown_skill")
     if skill_name in MCQ_SKILLS:
-        answer_idx = int(doc['answer_idx'])
+        answer_idx = doc['answer_idx']
         question = doc['question'] + "\nOptions are:\n"
         options = doc.get('options', [])
         options = ast.literal_eval(options) if isinstance(options, str) else options
